@@ -1,0 +1,317 @@
+Replicated Popcorn prototype with non-overlapping address space
+===============================================================
+
+Info about how the non overlapping address space is defined is present in
+that file: "arch/x86/include/asm/pierre_dcl.h".
+
+Instructions:
+=============
+
+1. Compile the first replica by editing "arch/x86/include/asm/pierre_dcl.h"
+and setting the #define at the start of the file to:
+
+#define DCL_REP1
+
+Use the configft-dcl file as the default configuration:
+
+cp configft-dcl .config
+make oldconfig
+
+Then compile and install the first replica with ./kinst.sh at the root of mklinux sources. 
+
+Note that currently on qemu I use this as kernel boot arguments:
+
+GRUB_CMDLINE_LINUX_DEFAULT="earlyprintk=ttyS0,115200 console=tty0 console=ttyS0,115200 norandmaps vsyscall64=0 vdso=0 acpi_irq_nobalance no_ipi_broadcast=1 vty_offset=0xb0000000 present_mask=0 mem=1024M"
+
+To find the right values for you machine have a look at the Popcorn Linux
+guide: http://chronoslinux.org/foswiki/bin/view/MultiKernelLinux/PopcornQemuGiuliano.
+
+2. Compile the second replica
+Once again edit "arch/x86/include/asm/pierre_dcl.h" and set the #define at the start of the file to:
+
+#define DCL_REP2
+
+This time compile using:
+
+make vmlinux
+
+As we don't want to install the second replica.
+
+3. Use the ./create_elf.sh script from mklinux-utils (branch: dcl-pierre) to create an elf file 
+from the second replica (vmlinux from previous compilation).
+
+You can now boot the second replica.
+
+Note that with my current qemu setup the values for the secondary kernel parameters are (in boot_args_1.args):
+
+earlyprintk=ttyS1,115200 console=ttyS1,115200 norandmaps vsyscall64=0 vdso=0 acpi_irq_nobalance no_ipi_broadcast=1 lapic_timer=1000000 pci_dev_flags=0x8086:0x7010:b,0x8086:0x100e:b,0x1234:0x1111:b,0x8086:0x7000:b,0x8086:0x7113:b mklinux debug vty_offset=0xb0000000 present_mask=1 memmap=1024M@1024M memmap=1023M$1M mem=2048M memmap=516k$64k
+
+And in boot_args_1.param I have:
+
+vmlinux.elf boot_args_1.args 1 0x40000000 0x60000000
+
+Launching a replicated application:
+
+Get mklinux-utils (git clone ssh://git@chronoslinux.org/mklinux-utils), branch: dcl-pierre
+
+1. Boot primary
+2. Boot secondary from mklinux-utils (using pierre_boot.sh) and ssh into 
+   it in one seperate window. If you are using the VM metnionned below,
+   the boot of the secondary might break the network connection between
+   the host and the VM. See the README.txt at the root of the VM archive
+   to learn how to launch several serial lines.
+3. On the primary go to the ns/ directory in mklinux-utils and do:
+   ./launch_ns.sh
+   ./popcorn_rep.sh 2
+4. From now each application you launch will be replicated in the secondary
+   note that the executable path should be the same on both replicas and it
+   does not supports symlinks (like the busybox symlinks in the secondary)
+   ramdisk.
+
+There is also a VM with more or less everything already compiled:
+https://drive.google.com/open?id=12TIg0m6sz4jMWNzVjVjp56YFtPUekCGuS7OyznsjPHk
+
+Documentation for the VM below:
+-------------------------------
+
+This is a headless VM used for development of the replicated kernel 
+with non overlapping address space.
+
+ ------------------------
+| Root pw of the VM is: a|
+ ------------------------
+
+0. Requirements & general overview:
+===================================
+Requirements:
+- KVM and a briged network connection
+- minicom
+- regular tools for kernel compilation (on debian: build-essential, 
+  etc.) for the host compilation
+- Lot of space on your filesystem because of the two out-of-tree 
+  compilations dirs needed
+  
+The standard process for working with the VM is:
+A. Boot the VM
+B. Compile and install primary kernel
+C. Compile and setup secondary kernel
+D. Reboot into primary kernel
+E. Setup secondary kernel ramdisk
+F. Boot secondary kernel
+G. Setup envirnoment for replicated applications
+H. Launch replicated applications
+
+Below is some documentation related to all of these steps and some 
+additional info too, related to various topics.
+
+1. Launching the VM:
+====================
+Have a look a launch.sh and use that script to launch the VM. Edit the 
+script according to the resources of your host (CPUs / RAM). Note that
+obviously you will need at least 2 CPUs, one for each replica. 2G of RAM
+for the VM is a mnimum.
+ 
+With the current options, KVM is spawning the regular qemu VGA console,
+and also redirecting 2 serial ports to /dev/pty/xx (xx being variable
+and indicated by kvm at launch time). These three serial port are 
+useful to have several console when we boot the secondary as this 
+it breaks the network connection between the host and the VM so we
+cannot use ssh to have multiple consoles in the VM. It is necessary to
+have several console to work with replicated applications.
+
+You should see a grub menu on qemu VGA console, the most important is 
+the first one which is the primary kernel (there is already a version
+installed): 
+- Debian GNU/Linux, with Linux 3.2.14ft-dcl+
+With this entry you boot on that one with 1 CPU and 1G of RAM dedicated
+to this kernel.
+The other interesting entry is
+- Debian GNU/Linux-COMPILE, with Linux 3.2.14ft-dcl+
+For this entry you boot with all the CPUs and all the RAM for this 
+kernel. Useful when doing kernel compilation inside the VM (to benefit
+from more cores and more memory). Do not try to boot the secondary when
+all the resources are given to the primary, use the first grub entry for
+this.
+
+Une login "root" and pw "a". in the /root directory there are several 
+folders, the interesting ones are:
+- mklinux-kvmx: sources of the kernel, obtained from:
+  git clone ssh://git@chronoslinux.org/mklinux-kvmx
+  Use the master branch.
+  You might want to pull the repo. To be able to
+  pull you need to put your ssh key in /root/.ssh. Note that with this 
+  ssh access you are also able to create branches and push.
+- mklinux-utils, various utilities to work with popcorn and replicated
+  popcorn, coming from: 
+  git clone ssh://git@chronoslinux.org/mklinux-utils
+  Use the dcl-pierre branch. With ssh access you have also write access
+  as for mklinux-kvmx.
+  
+2. Compiling replicas:
+======================
+We use two out-of-tree compilation directories to compile the two 
+replicas without triggering a full kernel recompilation each time we 
+edit Linux sources source (full kernel recompilation is necessary when
+doing a regular build as changing the virtual address space layout 
+basically triggers all the makefile dependecies).
+
+To setup the two directories, use the script setup_oot_build.sh. This 
+will create two directories in the parent folder, named replica1 and
+replica2. Each one concerns one replica and they only differ in the
+.config file each one contains: CONFIG_KMVX_REP2 is set to 'n' in 
+replica1/ and 'y' in replica2/. The important thing to note here is that
+if the configuration must be changed, you need to edit _both files_ !
+
+Naming and convention - replica1 vs replica2 vs primary vs seconday:
+--------------------------------------------------------------------
+Replica1 differs from replica2 from the virtual address space layout 
+point of view (and I guess from the randomization point of view too).
+The primary kernel is the one launched by the bootloader of the VM, and 
+the secondary is the one launched from the primary. Both replicas can be
+used as primary and secondary kernels. As a convention, let's assume 
+that replica1 will be the primary, and replica2 the secondary.
+
+There are two ways to build the primary and secondary kernels: remotely
+and inside the VM. Remote builds are by definition faster, so they are 
+the recommended way to go.
+
+Remote build - primary: 
+-----------------------
+cd to replica1/ and edit the script build_remote_primary.sh with the IP
+of the VM. Then use that script to compile and remotely install the 
+kernel, modules, and kernel headers, and also do update-grub. Do not
+forget to reboot the VM after updating the primary.
+
+Remote build - secondary:
+-------------------------
+cd to your secondary folder (by convention, replica2), edit the script
+build_remote_secondary.sh and launch it.
+
+Local build - primary:
+----------------------
+cd to your primary folder and use build_local_primary.sh.
+
+Local build - secondary:
+------------------------
+cd to your secodary folder and use build_local_secodary.sh.
+
+Command line parameters for the primary are already set in 
+/etc/default/grub and should be fine for the qemu VM. The secondary 
+kernel boot parameter are present in mklinux-utils/boot_args_1.args and
+should be fine too for the VM.
+
+3. Reboot into primary kernel:
+==============================
+When a new primary is installed in /boot you need to reboot to launch,
+it. Use the 'halt' command (not 'reboot' as sometimes 'reboot' just
+relaunch the currently running kernel). Actually, I made an alias for 
+reboot in .bashrc that is in fact calling halt :)
+
+4. Setup the secondary kernel ramdisk:
+======================================
+This will be the rootfs of the secondary. It is needed to regenerate the
+ramdisk when installing a new replicated application, as a copy of the 
+executable must be present on the primary and on the secondary replica.
+Note that in the VM there is already a ramdisk in 
+mklinux-utils/ramdisk.img
+
+cd into mklinux-utils/custom_ramdisk and execute this to generate the 
+ramdisk:
+./make_image.sh ../
+
+Have a look at the script and the packages/ folder to see how to add
+files to the ramdisk.
+
+===================================
+Launching a replicated application
+===================================
+
+Once everyhting is ready concerning both kernels, there are several 
+steps for launching a replicated application.
+
+5. Getting several consoles on the VM:
+======================================
+Launching the secondary kernel is going to break the network connection
+between the host and the VM. Moreover, we need several consoles open on 
+the VM to launch a replicated application. One solution is to ask
+qemu to create two serial ports and redirect them to some tty on the 
+host. The luanch.sh script is already taking care of that. When you
+launch that script, wemu is going to print something like:
+
+char device redirected to /dev/pts/12 (label serial0)
+char device redirected to /dev/pts/20 (label serial1)
+
+The actual id (/dev/pts/xx) can vary. Open two terminals on the host and
+connect to the corresponding pty:
+sudo minicom -D /dev/pts/xx
+
+I like to organize the terminals on my screen as something like that:
+
++------------+   +------------+
+|Qemu VGA    |   |./launch.sh |
+|console     |   |            |
+|            |   |            |
+|    (A)     |   |     (B)    |
++------------+   +------------+
+
++------------+   +------------+
+|ttyS0       |   |ttyS1       |
+|            |   |            |
+|            |   |            |
+|    (C)     |   |    (D)     |
++------------+   +------------+
+
+After the primary boot process, you should have a login prompt on A, C
+and D.
+
+6. Boot the secondary kernel:
+=============================
+In one of the redirected serial terminals (let's say C), cd to 
+mklinux-utils and use ./pierre_boot.sh
+
+You should see a boot log on one of the serial outputs. Note that even
+if you see "Please press Enter to activate this console.", you are still
+not in the secodary !
+
+7. ssh into the secondary:
+==========================
+After booting the secondary you loose control over one of {C, D}. On the
+other where you can still type commands, ssh into the secondary:
+
+ssh 10.1.2.2
+
+The root password is "passwd". Leave that terminal open, we will not 
+type any command here, it is only useful to see the secondary standard
+output. 
+
+8. Setup the replicated environment:
+====================================
+On a third terminal (here I use qemu VGA console, A on my small schema
+above):
+
+cd into mklinux-utils/ns. 
+There, type the following:
+./launch_ns.sh
+(press enter)
+./popcorn_rep.sh 2
+
+9. Launch replicated applications:
+==================================
+Still in that terminal, everything you launch is now replicated. You 
+can try it by typing:
+
+busybox ls
+
+You should see the output of ls in both terminals. Note that the path 
+for the application should be the same on both replicas filesystems, and
+it seems that the system does not supports symlinks: so just typing "ls"
+does not work as it is a symlink to busybox in the secondary.
+
+X. More info about non overlapping address space and its implementation:
+========================================================================
+A statically defined non-overlapping address space is automatically 
+generated for both replicas through the compile scripts.
+
+Details of the implemetation and a comprehensive documentation is 
+present in:
+mklinux-kvmx/arch/x86/include/asm/pierre_dcl.h

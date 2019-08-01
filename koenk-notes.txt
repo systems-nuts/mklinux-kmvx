@@ -1,0 +1,48 @@
+kmalloc type-safe reuse
+=======================
+
+kmalloc has a number of size-based caches normally, created in kmem_cache_init()
+in mm/slub.c. kmalloc() is defined in include/linux/slub_def.h in order to
+inline a fast path with constant propagation. The slab caches are kept in the
+global kmalloc_caches, and is used by two functions: kmalloc_slab() in fastpath
+and slab_get() for slowpath in mm/slub.c.
+
+We replace kmalloc with a version that has a slabcache per *type* instead of
+size, to achieve type-safe memory reuse. There are multiple factors here, and
+multiple ways of achieveing this.
+
+First of all, we have to determine the type. We do this by looking at the
+_allocation site_. We can do this in broadly 2 ways: look at the return address
+inside kmalloc, or instrument all occurances of kmalloc() before compilation to
+include the type or something unique like __FILE__ + __LINE__.
+Another factor is the classification of a type; ideally we have a static list of
+caches, where the 'type information' is hashed into an index for this list.
+problems with this process are how to efficiently yet uniquely create these
+hashes, that also all fall inside the (relatively small) range of this list.
+
+For our solution, we opted for a more dynamic and easier solution (albeit
+slower): we determine the type via the return address (i.e., the instruction
+pointer of the kmalloc() callsite), and maintain a dynamic list, acting as a rip
+-> cache hashmap kind of structure. When a rip is not found in the list (scanned
+linearly), we create a new cache and add it. The list is currently fixed in
+size.
+
+To facilitate these changes in the code, we had to eliminate the fast-path
+of kmalloc(), as this is purely size-based.  Possible future optimization is
+instrumenting the source, adding types (starting at 0) to kmalloc() calls, which
+can then be directly used as index into the cache-list. This allows for constant
+propagation similar to the size-based fast-path. We could have a fallback on the
+current systems for cases our instrumentation does not detect.
+
+One issue encountered with this appraoch is kmalloc() calls with a variable
+length, e.g., kstrdup() which calls kmalloc(strlen(str)). To fix this, we could
+make the keys in our cache datastructure tuples of (callsite, size). However, at
+the moment a kmalloc_unsafe has been added, which falls back on the old
+size-based behavior. kstrdup() has been manually modified to use this function
+now (which in replica1 calls normal kmalloc()). Another possible solution is to
+record the size per callsite, and fall back on old size-based behavior - this
+would be more memory-efficient than creating a cache per (callsite,size) tuple.
+
+I *think* variable-size kmalloc() calls are harmless in terms of type-safe
+memory reuse. Attackers will mostly target structs, not e.g. strings. The only
+possible issue is arrays-of-structs?
